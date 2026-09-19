@@ -1,0 +1,10 @@
+# 应用器运行时自动生成的备份（各安装一个子目录）
+patches/backup-auto/
+
+# 首次手工改动时留存的上游原始源码副本（若你本地还原过）
+patches/backup-2026-09-15/
+
+# 通用
+node_modules/
+.DS_Store
+*.log

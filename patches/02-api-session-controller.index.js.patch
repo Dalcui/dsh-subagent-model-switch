@@ -1,0 +1,188 @@
+--- a/dsh-api-session-controller/lib/index.js
++++ b/dsh-api-session-controller/lib/index.js
+@@ -19,6 +19,18 @@
+ import { isAbsolute } from "node:path";
+ import { FsError } from "@deepseek-ai/dsh-fs";
+ import mime from "mime-types";
++/**
++* Read the subagent mode from the first durable `subagent/descriptor` event of
++* one child session, matching the subagent service's own fold semantics.
++* @param events - the child's durable events.
++* @returns `continuable`, `one-shot`, or undefined when absent.
++*/
++function foldSubagentMode(events) {
++	for (const event of events) {
++		if (event.type === "subagent/descriptor") return event.data?.mode;
++	}
++	return void 0;
++}
+ //#region lib/types/agent.js
+ /** Agent activation, composition, and model-selection policy owned by API Session. */
+ var __addDisposableResource$4 = function(env, value, async) {
+@@ -603,7 +615,9 @@
+ 	* @returns the normalized selection installed for the Session.
+ 	*/
+ 	async selectModel(request) {
+-		const agent = await this.resolveAgent(request.sessionId);
++		const resolved = await this.resolveAgentForModel(request.sessionId);
++		if (resolved === void 0) return this.recordColdSubagentSelection(request.sessionId, request);
++		const agent = resolved;
+ 		return this.agents.serializeImageAdmission(agent, async () => {
+ 			try {
+ 				const resolved = await this.ctx.llm.resolveCallConfig({
+@@ -617,10 +631,15 @@
+ 					...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
+ 				};
+ 				this.agents.selectForNextRequest(agent, selected);
+-				try {
+-					await this.ctx.agentDefaultModel.saveSelection(selected);
+-				} catch (error) {
+-					this.ctx.logger.warn(`session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`);
++				// A subagent session must not rewrite the deployment default model:
++				// its selection is session-local and the Host intentionally keeps
++				// Agent-bound controls out of the ordinary default-model flow.
++				if (agent.session.header.origin !== "subagent") {
++					try {
++						await this.ctx.agentDefaultModel.saveSelection(selected);
++					} catch (error) {
++						this.ctx.logger.warn(`session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`);
++					}
+ 				}
+ 				return { selected: { ...selected } };
+ 			} catch (error) {
+@@ -880,7 +899,135 @@
+ 		const found = await this.agents.resolveAgent(sessionId);
+ 		if ("error" in found) throw found.error;
+ 		return found.agent;
++	}
++	/**
++	* Resolve one Agent for a model-selection request, admitting a live subagent
++	* child while keeping every other Agent-bound control fenced. The ordinary
++	* SessionAgentRegistry path rejects subagent sessions by design
++	* (ApiSessionSubagentOwnership); a live child resolved from the shared Agent
++	* registry may still have its next request routed to a user-selected model.
++	* A cold continuable subagent whose live direct parent is online returns
++	* undefined so the caller records the selection for its next activation
++	* (cold resume prefers the recorded model/selection over the descriptor).
++	* @param sessionId - requested Session identity.
++	* @returns the live Agent, undefined for a recordable cold subagent, or throws a stable Session-domain failure.
++	*/
++	async resolveAgentForModel(sessionId) {
++		const found = await this.agents.resolveAgent(sessionId);
++		if (!("error" in found)) return found.agent;
++		const live = this.ctx.agents.get(sessionId);
++		if (live !== void 0 && live.session.header.origin === "subagent") {
++			// One-shot children never issue another request; only continuable
++			// children may switch models (matches the cold branch's gate).
++			if (foldSubagentMode(live.session.snapshotEvents()) === "continuable") return live;
++		}
++		// Cold child: read-only inspection (viewing history never publishes the
++		// session), admit only a continuable child whose live direct parent is
++		// online so the caller records the selection for its next activation.
++		try {
++			const inspected = await inspectApiSession(this.ctx, sessionId);
++			if (inspected.meta.origin === "subagent") {
++				const parentId = inspected.meta.parentSession;
++				const parent = parentId === void 0 ? void 0 : this.ctx.agents.get(parentId);
++				if (parent !== void 0 && foldSubagentMode(inspected.events) === "continuable") return void 0;
++			}
++		} catch {
++			// missing or unreadable: keep the ownership failure below
++		}
++		throw found.error;
+ 	}
++	/**
++	* Record one user-chosen model for a cold continuable subagent. The child is
++	* not live, so the selection cannot be installed on an Agent yet; appending
++	* the durable `model/selection` event lets the next cold resume prefer this
++	* route over the creation-time descriptor. The live direct parent must be
++	* online (continuation ownership), and the default model is never rewritten.
++	* @param sessionId - the cold subagent identity.
++	* @param request - requested model selection.
++	* @returns the normalized selection recorded for the child.
++	*/
++	async recordColdSubagentSelection(sessionId, request) {
++		const persistence = this.ctx.get("sessionPersistence");
++		if (persistence === void 0) throw new RemoteError("gateway/internal", "session persistence is unavailable", {});
++		// Race guard: the child may have been activated between the cold probe and
++		// this write; fall back to the live install path so the window never loses
++		// the user's selection (reviews flag: api-session-controller race window).
++		const racing = this.ctx.agents.get(sessionId);
++		if (racing !== void 0 && racing.session.header.origin === "subagent") {
++			const resolved = await this.ctx.llm.resolveCallConfig({
++				provider: request.provider,
++				model: request.model,
++				...request.reasoningEffort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }
++			});
++			const selected = {
++				provider: resolved.provider,
++				model: resolved.model,
++				...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
++			};
++			this.agents.selectForNextRequest(racing, selected);
++			return { selected: { ...selected } };
++		}
++		// Resolve and validate the route before any write.
++		let resolved;
++		try {
++			resolved = await this.ctx.llm.resolveCallConfig({
++				provider: request.provider,
++				model: request.model,
++				...request.reasoningEffort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }
++			});
++		} catch (error) {
++			if (remoteErrorOf(error) !== void 0) throw error;
++			throw new RemoteError("session/model-unavailable", error instanceof Error ? error.message : String(error), {
++				provider: request.provider,
++				model: request.model
++			});
++		}
++		const selected = {
++			provider: resolved.provider,
++			model: resolved.model,
++			...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
++		};
++		// Inspect the persisted child (origin, mode, live parent) then append the
++		// durable model/selection event; cold resume prefers it over the descriptor.
++		let inspected;
++		try {
++			inspected = await inspectApiSession(this.ctx, sessionId);
++		} catch (error) {
++			if (error instanceof ApiSessionNotFound) throw new RemoteError("session/not-found", error.message, { sessionId });
++			throw error;
++		}
++		if (inspected.meta.origin !== "subagent") throw apiSessionSubagentOwnershipError(sessionId);
++		if (foldSubagentMode(inspected.events) !== "continuable") {
++			throw new RemoteError("session/agent-busy", `subagent "${sessionId}" is one-shot and cannot switch models`, {});
++		}
++		const parentId = inspected.meta.parentSession;
++		const parent = parentId === void 0 ? void 0 : this.ctx.agents.get(parentId);
++		if (parent === void 0) {
++			throw new RemoteError("session/agent-busy", `subagent "${sessionId}" needs its live parent session to switch models`, {});
++		}
++		let handle;
++		try {
++			handle = await persistence.open(sessionId, "write");
++		} catch (error) {
++			if (error !== void 0 && error !== null && (error.name === "SessionAlreadyOwnedError" || error.name === "SessionOwnershipLostError")) {
++				throw new RemoteError("session/agent-busy", `subagent "${sessionId}" is now active; switch its model from the subagent view`, {});
++			}
++			throw error;
++		}
++		try {
++			const { events } = await handle.read();
++			await handle.append([{
++				type: "model/selection",
++				seq: events.length,
++				time: Date.now(),
++				data: selected
++			}]);
++			await handle.flush();
++		} finally {
++			await handle.close();
++		}
++		return { selected: { ...selected } };
++	}
+ 	rejectCreation(sessionId, error) {
+ 		if (remoteErrorOf(error) !== void 0) throw error;
+ 		if (error instanceof ApiSessionPresetConflict) throw new RemoteError("agent-preset/conflict", error.message, {

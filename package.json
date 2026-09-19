@@ -1,0 +1,18 @@
+{
+  "name": "dsh-subagent-model-switch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enable per-subagent model switching in the DeepSeek Harness Web UI",
+  "type": "module",
+  "scripts": {
+    "check": "node patches/apply-subagent-model-patch.mjs --check",
+    "scan": "node patches/apply-subagent-model-patch.mjs --scan",
+    "apply": "node patches/apply-subagent-model-patch.mjs",
+    "verify": "node patches/apply-subagent-model-patch.mjs --verify",
+    "revert": "node patches/apply-subagent-model-patch.mjs --revert"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

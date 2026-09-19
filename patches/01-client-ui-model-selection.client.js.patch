@@ -1,0 +1,100 @@
+--- a/dsh-client-ui-model-selection/lib/client.js
++++ b/dsh-client-ui-model-selection/lib/client.js
+@@ -10,6 +10,20 @@
+ 		let react = require("react");
+ 		let react_dom = require("react-dom");
+ 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
++		/**
++		* Whether one session may expose Agent-bound model selection. Ordinary sessions
++		* always may; addressed subagent sessions only when continuable. One-shot and
++		* parent-offline continuable views replace the composer entirely, so the seat
++		* never renders there; the /model command still guards via this predicate and
++		* the Host rejects non-live children with an explicit error.
++		* @param sessions - the session wire face (captured from the plugin's root connection).
++		* @param sessionId - the owning session.
++		* @returns whether model selection controls may appear for this session.
++		*/
++		function subagentModelSelectable(sessions, sessionId) {
++			const address = sessions.subagentAddress(sessionId);
++			return address === void 0 || address.mode === "continuable";
++		}
+ 		//#region lib/types/client/catalog.js
+ 		/** One Host-generation model catalog shared by every Session selector. */
+ 		/** Loads at most one model catalog for the current Host generation. */
+@@ -106,6 +120,14 @@
+ 				status: "idle",
+ 				error: null
+ 			});
++			/**
++			* Locally confirmed selection from the last successful Host write. An
++			* addressed subagent session subscribes to no event stream, so its
++			* durable projection cannot advance on its own; this value keeps the
++			* composer showing the model the Host just accepted until a later
++			* history read reflects it.
++			*/
++			confirmed;
+ 			/** Latest selection operation wins; an older response never overwrites a newer one. */
+ 			generation = 0;
+ 			disposed = false;
+@@ -173,6 +195,11 @@
+ 					});
+ 					throw new Error(`session.selectModel failed: ${result.error.code}: ${result.error.message}`);
+ 				}
++				this.confirmed = {
++					provider: selection.provider,
++					model: selection.model,
++					...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort }
++				};
+ 				this.store.update((s) => {
+ 					s.status = "ready";
+ 					s.error = null;
+@@ -222,7 +249,11 @@
+ 					});
+ 					return;
+ 				}
+-				const current = projected.next ?? catalog.value.default;
++				// A confirmed Host write outranks the durable projection: an addressed
++			// subagent session receives no event stream, so its projection still
++			// carries the pre-write route; the composer must show what the Host
++			// just accepted.
++			const current = this.confirmed ?? projected.next ?? catalog.value.default;
+ 				this.resolved = true;
+ 				this.store.set({
+ 					current,
+@@ -302,7 +333,7 @@
+ 				if (actx === void 0) throw new Error(`ui-model-selection: session "${String(sessionId)}" resolved no scope`);
+ 				const binding = sessions.binding(sessionId);
+ 				if (binding === void 0) throw new Error(`ui-model-selection: session "${String(sessionId)}" resolved no binding`);
+-				const directory = new ModelDirectory(this.ctx.remote.session, sessionId, () => sessions.subagentAddress(sessionId) === void 0, this.catalog, binding.session.projections.faceOf("modelSelection"));
++				const directory = new ModelDirectory(this.ctx.remote.session, sessionId, () => subagentModelSelectable(sessions, sessionId), this.catalog, binding.session.projections.faceOf("modelSelection"));
+ 				live.directories.set(sessionId, directory);
+ 				const conversation = this.ctx.get("conversation");
+ 				if (conversation !== void 0) {
+@@ -919,15 +950,15 @@
+ 				scope.effect(() => command.register({
+ 					name: "model",
+ 					description: () => t("command.description"),
+-					available: (session) => sessions.subagentAddress(session.sessionId) === void 0,
++					available: (session) => subagentModelSelectable(sessions, session.sessionId),
+ 					ui: {
+ 						kind: "popupSelect",
+ 						options: async (session) => {
+-							if (sessions.subagentAddress(session.sessionId) !== void 0) throw new Error("model selection is unavailable for addressed subagent sessions");
++							if (!subagentModelSelectable(sessions, session.sessionId)) throw new Error("model selection is unavailable for this subagent session");
+ 							return optionsOf(await models.directoryFor(session.sessionId).load(), t);
+ 						},
+ 						onSelect: async (option, session) => {
+-							if (sessions.subagentAddress(session.sessionId) !== void 0) throw new Error("model selection is unavailable for addressed subagent sessions");
++							if (!subagentModelSelectable(sessions, session.sessionId)) throw new Error("model selection is unavailable for this subagent session");
+ 							const directory = models.directoryFor(session.sessionId);
+ 							const selection = selectionOf(directory.store.getSnapshot(), option.id);
+ 							if (selection === void 0) throw new Error("this provider's catalog failed to load — pick a model from a loaded group");
+@@ -944,7 +975,7 @@
+ 					locale: NS,
+ 					inject: (sessionId) => {
+ 						const directory = models.directoryFor(sessionId);
+-						const available = sessions.subagentAddress(sessionId) === void 0;
++						const available = subagentModelSelectable(sessions, sessionId);
+ 						return {
+ 							available,
+ 							directory: directory.store,
