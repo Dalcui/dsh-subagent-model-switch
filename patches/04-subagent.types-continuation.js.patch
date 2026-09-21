@@ -1,65 +1,44 @@
 --- a/dsh-subagent/lib/types/continuation.js
 +++ b/dsh-subagent/lib/types/continuation.js
-@@ -69,6 +69,81 @@
+@@ -69,6 +69,60 @@ import { brandString } from '@deepseek-ai/dsh-brand';
  import { ReasoningEffortId, contentHasImage, createUserMessage } from '@deepseek-ai/dsh-llm';
  import { SessionLogOffset } from '@deepseek-ai/dsh-session';
  import { childSessionMeta, captureDelegatedPolicyOverrides, resolveChildAgentOptions, resolveChildDepth, } from "./child-agent.js";
-+import { installModelSelection } from "@deepseek-ai/dsh-agent";
 +/**
-+* Per-agent installed model-selection handles. Installing twice on the same
-+* Agent ctx would register duplicate listeners with stale closures; one handle
-+* per Agent is reused and its current is updated in place. WeakMap lets a
-+* disposed child Agent be GC'd.
++* Per-agent installed model-selection handles. One overlay per Agent; the
++* WeakMap lets a disposed child Agent be GC'd.
 +*/
 +const installedChildSelections = /* @__PURE__ */ new WeakMap();
 +/**
-+* Install (once) or update the session-local model selection on a live child
-+* Agent so its next acting request is routed to the recorded model even though
-+* the child subscribes to no client event stream and would otherwise restore
-+* its last request header.
++* Install (once) a session-local model routing overlay on a live child Agent so
++* its next acting request is routed to the newest recorded model/selection even
++* though the child subscribes to no client event stream and would otherwise
++* restore its last request header. The overlay reads the child's own durable
++* `model/selection` events on every request instead of caching an in-memory
++* snapshot, so it stays in sync with the live switch path (the session
++* controller's `selectForNextRequest` appends the same event) and never
++* clobbers a newer choice with a stale value.
 +* @param agent - the live child Agent.
-+* @param selected - the recorded provider/model/effort selection.
 +*/
-+function ensureModelSelectionInstalled(agent, selected) {
-+	const existing = installedChildSelections.get(agent);
-+	if (existing === void 0) {
-+		const selection = {
-+			current: { ...selected },
-+			consume: () => false,
-+			assembled: void 0,
++function ensureModelSelectionInstalled(agent) {
++	if (installedChildSelections.has(agent)) return;
++	// Minimal routing overlay: only the agent/request waterfall is wired.
++	// installModelSelection's full triple (assemble + request + pre-step
++	// switch-notice) breaks turn startup on a cold-resumed child, so it is
++	// deliberately not used here.
++	agent.ctx.on("agent/request", async (_payload, next) => {
++		const resolved = await next();
++		const sel = latestSubagentModelSelection(agent.session.ownEvents());
++		if (sel === void 0) return resolved;
++		const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved;
++		return {
++			...withoutInheritedEffort,
++			provider: sel.provider,
++			model: sel.model,
++			...(sel.reasoningEffort === void 0 ? {} : { reasoningEffort: sel.reasoningEffort })
 +		};
-+		// Minimal routing overlay matching the running lib/index.js bundle:
-+		// only the agent/request waterfall is wired. installModelSelection's full
-+		// triple (assemble + request + pre-step switch-notice) breaks turn startup
-+		// on a cold-resumed child and must not be reintroduced here.
-+		agent.ctx.on("agent/request", async (_payload, next) => {
-+			const resolved = await next();
-+			const sel = selection.current;
-+			if (sel === void 0) return resolved;
-+			return {
-+				provider: sel.provider,
-+				model: sel.model,
-+				...(sel.reasoningEffort === void 0 ? {} : { reasoningEffort: sel.reasoningEffort }),
-+				...(resolved.maxTokens === void 0 ? {} : { maxTokens: resolved.maxTokens }),
-+			};
-+		});
-+		installedChildSelections.set(agent, selection);
-+	}
-+	else {
-+		existing.current = { ...selected };
-+	}
-+}
-+/**
-+* Compare one recorded selection with the Agent's last persisted request header.
-+* @param selected - recorded selection.
-+* @param agent - live child Agent.
-+* @returns true when the header route differs from the recorded selection.
-+*/
-+function selectionDiffersFromHeader(selected, agent) {
-+	const header = agent.session.requestHeader();
-+	if (header === void 0) return true;
-+	const config = header.config;
-+	return config.provider !== selected.provider || config.model !== selected.model || (config.reasoningEffort !== selected.reasoningEffort);
++	});
++	installedChildSelections.set(agent, true);
 +}
 +/**
 +* Latest user-recorded session-local model selection for a subagent child,
@@ -82,23 +61,19 @@
  import { ContinuableActivationRegistry, } from "./continuation-activation.js";
  import { createAgentMessage, withContinuableReturnGuidance, } from "./continuation-messages.js";
  import { assertSubagentMaxDepth } from "./depth.js";
-@@ -266,6 +341,15 @@
+@@ -266,6 +320,11 @@ export class SubagentContinuationManager {
                          return undefined;
                      }
                  }
 +                // A web model switch recorded while the child was cold must also
-+                // take effect when the child is still resident (parent wakeups
-+                // keep it live): refresh the installed selection ahead of the
-+                // admitted follow-up so this turn requests the new route.
-+                const childAgent = activation.handle.agent;
-+                const recordedModel = latestSubagentModelSelection(childAgent.session.snapshotEvents());
-+                if (recordedModel !== void 0 && selectionDiffersFromHeader(recordedModel, childAgent)) {
-+                    ensureModelSelectionInstalled(childAgent, recordedModel);
-+                }
++                // take effect when the child is still resident: ensure the
++                // routing overlay is installed; it reads the newest
++                // model/selection on every request.
++                ensureModelSelectionInstalled(activation.handle.agent);
                  const messageId = this.submitAdmitted(activation, content, options, parent);
                  activation.announced = true;
                  return messageId;
-@@ -352,10 +436,17 @@
+@@ -352,10 +411,17 @@ export class SubagentContinuationManager {
              const source = __addDisposableResource(env_1, observation, false);
              this.activations.assertAdmitting(parent);
              this.activations.authorizeLineage(parent, childId, source.header.parentSession);
@@ -117,7 +92,7 @@
              let activation;
              try {
                  activation = await this.activations.materialize({
-@@ -363,10 +454,10 @@
+@@ -363,10 +429,10 @@ export class SubagentContinuationManager {
                      provider: descriptor.provider,
                      parent,
                      agentOptions: {
@@ -132,7 +107,7 @@
                              : {},
                      },
                      composition: { persona: descriptor.persona, toolFilter: descriptor.toolFilter },
-@@ -379,6 +470,13 @@
+@@ -379,6 +445,13 @@ export class SubagentContinuationManager {
                      throw error;
                  throw new SubagentError(`subagent "${childId}" is unavailable`, 'NOT_RESUMABLE', { cause: error });
              }
@@ -141,7 +116,7 @@
 +            // persisted header). Install the session-local selection so the
 +            // agent/request waterfall routes this resumed turn to the new model.
 +            if (selectedModel !== void 0) {
-+                ensureModelSelectionInstalled(activation.handle.agent, selectedModel);
++                ensureModelSelectionInstalled(activation.handle.agent);
 +            }
              return await this.submitMaterialized(activation, content, options, parent);
          }

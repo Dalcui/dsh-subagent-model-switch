@@ -3,9 +3,24 @@
 > 目标：在 Web 打开可继续（continuable）子代理会话时，composer 出现模型选择器（复用主会话模型菜单），可手动切换该子代理所用模型。
 > 性质：修改 DSH 安装包源码（node_modules），**升级会被覆盖**，需按本文重打。
 > 备份：patches/backup-2026-09-15/
-> 审查：subagent 只读审查判定**可用**（三处改动语义自洽），两处小风险已修复（见下）；
+> 审查：历经两轮独立 subagent 对抗式源码审查——第一轮发现 2 HIGH / 2 MEDIUM / 若干 LOW 缺陷，已全部修复（见下方「修复记录」）；第二轮复核判定 **PASS**（无 blocker/high/medium 新问题）。
 > 状态：**端到端验证成功（隔离实例）** = 选择器出现 + 切换写入 + UI 立即显示 + 激活后请求头使用新模型 + turn 正常 completed。
 > **关键踩坑**：① dsh-subagent 实际加载 lib/index.js（内嵌 continuation 代码），改 lib/types/continuation.js 无效——修改必须落在 lib/index.js；② installModelSelection 完整版（含 agent/pre-step 模型切换通知）会破坏冷恢复子代理的 turn 启动，必须用"精简安装"（仅挂 agent/request 覆盖）；③ 验证时需选一个已配置 API key 的 provider，否则请求会失败
+
+## 修复记录（两轮对抗式审查后的改进）
+
+> 第一轮独立 subagent 审查发现补丁本体在 fork/live 边界路径存在缺陷，已全部修复；第二轮复核确认修复正确、无新引入的 blocker/high/medium 问题。
+
+| 级别 | 问题 | 修复 |
+| --- | --- | --- |
+| HIGH-1 | 驻留刷新 `latestSubagentModelSelection(session.snapshotEvents())` 未剔除 fork 继承前缀，fork 子代理会误读父会话的 `model/selection` | 精简 overlay 改为每次请求实时读 `agent.session.ownEvents()`（剔除继承前缀），与 coldResume 的 `slice(inheritedEventCount)` 语义对齐 |
+| HIGH-2 | 精简 overlay（内存 `current` 快照）与完整 `installModelSelection` 两套 selection 状态叠加，cold→resume→live 切换时陈旧快照覆盖新选择 | 精简 overlay 不再缓存内存快照，改为每次 `agent/request` 从 session 的 `model/selection` 事件实时读取（controller `selectForNextRequest` 写同一事件），两套机制收敛到唯一真相源 |
+| MEDIUM-3 | `append/flush` 异常未包装 + `SessionOwnershipLostError` 捕获位置错位（写在 `open` 处，实际在 `append/flush` 抛） | `open` 只捕获 `SessionAlreadyOwnedError`；`append/flush` 新增 catch，将 `SessionOwnershipLostError`/`SessionAlreadyOwnedError`/`SessionHandleClosedError` 映射为 `session/agent-busy`，其余映射 `gateway/internal` |
+| MEDIUM-4 | 精简 overlay 重建 config 时丢弃 `resolved` 除 maxTokens 外的字段 | 改为 `{ ...withoutInheritedEffort, provider, model, reasoningEffort? }`，与官方 `installModelSelection` 的 request 覆盖同构 |
+| LOW-6 | `foldSubagentMode` 未剔除继承前缀（与 `foldSubagentDescriptor(ownEvents)` 语义不一致） | 三处调用改为剔除前缀（live 用 `ownEvents()`，cold 用 `slice(inheritedEventCount)`） |
+| LOW-8 | `continuation.js` 未使用的 `installModelSelection` import | 删除 |
+
+> 复核结论：**PASS**；仅余 1 个 low 级性能观察项（overlay 每次请求 O(n) 遍历 `ownEvents`，可后续改为增量 fold）。
 
 ## 一、改动文件（4 个文件 / 3 个包）
 

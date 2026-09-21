@@ -1,6 +1,6 @@
 --- a/dsh-api-session-controller/lib/index.js
 +++ b/dsh-api-session-controller/lib/index.js
-@@ -19,6 +19,18 @@
+@@ -19,6 +19,18 @@ import { isUserInvocable } from "@deepseek-ai/dsh-skill";
  import { isAbsolute } from "node:path";
  import { FsError } from "@deepseek-ai/dsh-fs";
  import mime from "mime-types";
@@ -19,7 +19,7 @@
  //#region lib/types/agent.js
  /** Agent activation, composition, and model-selection policy owned by API Session. */
  var __addDisposableResource$4 = function(env, value, async) {
-@@ -603,7 +615,9 @@
+@@ -603,7 +615,9 @@ var SessionCommandController = class {
  	* @returns the normalized selection installed for the Session.
  	*/
  	async selectModel(request) {
@@ -30,7 +30,7 @@
  		return this.agents.serializeImageAdmission(agent, async () => {
  			try {
  				const resolved = await this.ctx.llm.resolveCallConfig({
-@@ -617,10 +631,15 @@
+@@ -617,10 +631,15 @@ var SessionCommandController = class {
  					...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
  				};
  				this.agents.selectForNextRequest(agent, selected);
@@ -50,11 +50,10 @@
  				}
  				return { selected: { ...selected } };
  			} catch (error) {
-@@ -880,7 +899,135 @@
- 		const found = await this.agents.resolveAgent(sessionId);
+@@ -881,6 +900,140 @@ var SessionCommandController = class {
  		if ("error" in found) throw found.error;
  		return found.agent;
-+	}
+ 	}
 +	/**
 +	* Resolve one Agent for a model-selection request, admitting a live subagent
 +	* child while keeping every other Agent-bound control fenced. The ordinary
@@ -74,7 +73,7 @@
 +		if (live !== void 0 && live.session.header.origin === "subagent") {
 +			// One-shot children never issue another request; only continuable
 +			// children may switch models (matches the cold branch's gate).
-+			if (foldSubagentMode(live.session.snapshotEvents()) === "continuable") return live;
++			if (foldSubagentMode(live.session.ownEvents()) === "continuable") return live;
 +		}
 +		// Cold child: read-only inspection (viewing history never publishes the
 +		// session), admit only a continuable child whose live direct parent is
@@ -84,13 +83,13 @@
 +			if (inspected.meta.origin === "subagent") {
 +				const parentId = inspected.meta.parentSession;
 +				const parent = parentId === void 0 ? void 0 : this.ctx.agents.get(parentId);
-+				if (parent !== void 0 && foldSubagentMode(inspected.events) === "continuable") return void 0;
++				if (parent !== void 0 && foldSubagentMode(inspected.events.slice(inspected.inheritedEventCount)) === "continuable") return void 0;
 +			}
 +		} catch {
 +			// missing or unreadable: keep the ownership failure below
 +		}
 +		throw found.error;
- 	}
++	}
 +	/**
 +	* Record one user-chosen model for a cold continuable subagent. The child is
 +	* not live, so the selection cannot be installed on an Agent yet; appending
@@ -152,7 +151,7 @@
 +			throw error;
 +		}
 +		if (inspected.meta.origin !== "subagent") throw apiSessionSubagentOwnershipError(sessionId);
-+		if (foldSubagentMode(inspected.events) !== "continuable") {
++		if (foldSubagentMode(inspected.events.slice(inspected.inheritedEventCount)) !== "continuable") {
 +			throw new RemoteError("session/agent-busy", `subagent "${sessionId}" is one-shot and cannot switch models`, {});
 +		}
 +		const parentId = inspected.meta.parentSession;
@@ -164,7 +163,7 @@
 +		try {
 +			handle = await persistence.open(sessionId, "write");
 +		} catch (error) {
-+			if (error !== void 0 && error !== null && (error.name === "SessionAlreadyOwnedError" || error.name === "SessionOwnershipLostError")) {
++			if (error !== void 0 && error !== null && error.name === "SessionAlreadyOwnedError") {
 +				throw new RemoteError("session/agent-busy", `subagent "${sessionId}" is now active; switch its model from the subagent view`, {});
 +			}
 +			throw error;
@@ -178,6 +177,12 @@
 +				data: selected
 +			}]);
 +			await handle.flush();
++		} catch (error) {
++			if (error !== void 0 && error !== null && (error.name === "SessionOwnershipLostError" || error.name === "SessionAlreadyOwnedError" || error.name === "SessionHandleClosedError")) {
++				throw new RemoteError("session/agent-busy", `subagent "${sessionId}" is now active; switch its model from the subagent view`, {});
++			}
++			if (remoteErrorOf(error) !== void 0) throw error;
++			throw new RemoteError("gateway/internal", `failed to record subagent model selection: ${String(error)}`, { sessionId });
 +		} finally {
 +			await handle.close();
 +		}
