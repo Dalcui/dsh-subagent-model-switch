@@ -61,6 +61,8 @@ patches/
   02-api-session-controller.index.js.patch        # 后端：selectModel 放行子代理
   03-subagent.index.js.patch                      # 后端：coldResume 用记录的选择覆盖描述符
   04-subagent.types-continuation.js.patch         # 后端：非运行时入口的同步副本（optional）
+  05-model-garden.client.js.patch                 # 前端：dsh-model-garden 插件放行 continuable 子代理（optional）
+  06-model-picker.client.js.patch                 # 前端：dsh-model-picker 插件放行 continuable 子代理（optional）
   hunks.json                                      # 结构化补丁锚点（应用器据此工作）
   apply-subagent-model-patch.mjs                  # 跨平台应用器（Windows / macOS / Linux）
 docs/

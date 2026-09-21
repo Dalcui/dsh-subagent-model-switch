@@ -1,0 +1,13 @@
+--- a/client.js
++++ b/client.js
+@@ -556,6 +556,9 @@
+             priority: -1,
+             inject: (sessionId) => {
+               const available = sessions === undefined || sessions.subagentAddress === undefined
+                 ? true
+-                : sessions.subagentAddress(sessionId) === undefined;
++                : (() => {
++                    const address = sessions.subagentAddress(sessionId);
++                    return address === undefined || address.mode === "continuable";
++                  })();
+               if (models === undefined) {

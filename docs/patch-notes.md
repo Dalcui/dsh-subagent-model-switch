@@ -22,7 +22,7 @@
 
 > 复核结论：**PASS**；仅余 1 个 low 级性能观察项（overlay 每次请求 O(n) 遍历 `ownEvents`，可后续改为增量 fold）。
 
-## 一、改动文件（4 个文件 / 3 个包）
+## 一、改动文件（6 个文件 / 3 个核心包 + 2 个第三方插件）
 
 > 📌 **要复刻请直接看第五节**。本节的文字描述是摘要，其中第 3 条为实现细节的**旧版表述**，
 > 与"关键踩坑②"不一致：实际实现是**精简安装**（`ensureModelSelectionInstalled`，只挂 `agent/request`），
@@ -49,6 +49,13 @@
 - `coldResume`（约 338 行）：materialize 子代理后，若存在用户记录的选择（`selectedModel`），
   - agentOptions 用该选择覆盖 descriptor 的 provider/model/effort（作无持久化 header 时的基线）；
   - **并 `installModelSelection(childAgent.ctx, { current, consume: () => false, assembled: void 0 })`**，使下一次请求的 `agent/request` waterfall 覆盖 agent-loop 从持久化 requestHeader 恢复的旧模型（关键修复）。
+
+### 4. dsh-model-garden/client.js（前端，第三方插件，optional）
+- 该插件以 `priority: -1` 覆盖内置 `conversation.input.model` seat，自带 `available = sessions.subagentAddress(sessionId) === undefined` 的旧判断，导致 continuable 子代理选择器被锁定、无法切换。
+- 改为与内置 `subagentModelSelectable` 对齐：`address === undefined || address.mode === "continuable"`。
+
+### 5. dsh-model-picker/lib/client.js（前端，第三方插件，optional）
+- 同 dsh-model-garden：同样用旧判断覆盖 seat，导致子代理无法切换；改为同一对齐逻辑。
 
 ## 二、实现语义
 

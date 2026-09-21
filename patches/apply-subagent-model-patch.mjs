@@ -12,7 +12,8 @@
  *   node apply-subagent-model-patch.mjs --profile <profile 目录>   # 配合 --verify
  *
  * 目标：把 <dsh>/node_modules/@deepseek-ai/{dsh-subagent, dsh-api-session-controller,
- *      dsh-client-ui-model-selection} 三个包按补丁改写。
+ *      dsh-client-ui-model-selection} 三个核心包，以及 profile 下可选的第三方
+ *      模型选择插件（dsh-model-garden / dsh-model-picker，若已安装）按补丁改写。
  * 安全性：幂等（已打补丁的文件跳过）、逐 hunk 唯一锚点匹配（bundle 变了会明确报错而不乱写）、
  *        自动适配 LF/CRLF、写前自动备份、支持 --revert 回滚。
  */
@@ -23,7 +24,6 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PACKAGES = ['@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-client-ui-model-selection'];
 
 /** 解析 dsh 安装根（含 package.json name=@deepseek-ai/dsh 的目录）。 */
 function resolveDshRoot(explicit) {
@@ -137,17 +137,14 @@ function scanCopies(roots) {
     try { real = fs.realpathSync(dir); } catch { return; }
     if (seen.has(real)) return;
     seen.add(real);
-    for (const pkg of PACKAGES) {
-      for (const file of spec.files) {
-        if (file.package !== pkg) continue;
-        const target = path.join(dir, ...pkg.split('/'), file.path);
-        if (!fs.existsSync(target)) continue;
-        const rec = found.get(real + '|' + pkg) ?? { dir: real, pkg, entries: [] };
-        let patched = false;
-        try { patched = isPatchedFile(file, fs.readFileSync(target, 'utf8')); } catch {}
-        rec.entries.push({ path: file.path, patched });
-        found.set(real + '|' + pkg, rec);
-      }
+    for (const file of spec.files) {
+      const target = path.join(dir, ...file.package.split('/'), file.path);
+      if (!fs.existsSync(target)) continue;
+      const rec = found.get(real + '|' + file.package) ?? { dir: real, pkg: file.package, entries: [] };
+      let patched = false;
+      try { patched = isPatchedFile(file, fs.readFileSync(target, 'utf8')); } catch {}
+      rec.entries.push({ path: file.path, patched });
+      found.set(real + '|' + file.package, rec);
     }
     let entries = [];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -213,7 +210,7 @@ if (args.mode === 'verify') {
   console.log('profile: ' + profileDir);
   if (!fs.existsSync(profileDir)) { console.error('error: profile directory does not exist: ' + profileDir); process.exit(2); }
   let bad = 0;
-  for (const pkg of PACKAGES) {
+  for (const pkg of [...new Set(spec.files.map(f => f.package))]) {
     const resolvedPath = resolveFrom(profileDir, pkg);
     if (typeof resolvedPath === 'object') { console.error('UNRESOLVED ' + pkg + ' (' + resolvedPath.error + ')'); bad++; continue; }
     const pkgRoot = path.dirname(resolvedPath);
@@ -268,7 +265,13 @@ function installKey(root) {
   return safe + '-' + h.toString(16).padStart(8, '0');
 }
 
-function pkgDir(pkg) { return path.join(dshRoot, 'node_modules', ...pkg.split('/')); }
+/** 定位补丁目标文件所在目录：dsh 核心包在安装根 node_modules 下；第三方 profile 插件在 ~/.dsh/profiles/web/node_modules 下。 */
+function targetDir(file) {
+  if (file.base === 'profile') {
+    return path.join(dshHome(), 'profiles', 'web', 'node_modules', ...file.package.split('/'));
+  }
+  return path.join(dshRoot, 'node_modules', ...file.package.split('/'));
+}
 
 /**
  * 匹配一段锚点，容忍换行风格差异。依次尝试：
@@ -318,7 +321,7 @@ let applied = 0, skipped = 0, failed = 0, reverted = 0, missingBackup = 0, optio
 const plan = [];
 
 for (const file of spec.files) {
-  const target = path.join(pkgDir(file.package), file.path);
+  const target = path.join(targetDir(file), file.path);
   const label = file.package + '/' + file.path;
   const backup = path.join(BACKUP_DIR, file.package.replace('@deepseek-ai/', ''), file.path.replace(/\//g, '__'));
   if (!fs.existsSync(target)) {

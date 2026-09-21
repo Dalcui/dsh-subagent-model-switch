@@ -119,6 +119,32 @@
         }
       ],
       "optional": false
+    },
+    {
+      "patch": "05-model-garden.client.js.patch",
+      "package": "dsh-model-garden",
+      "path": "client.js",
+      "base": "profile",
+      "hunks": [
+        {
+          "old": "              const available = sessions === undefined || sessions.subagentAddress === undefined\n                ? true\n                : sessions.subagentAddress(sessionId) === undefined;",
+          "neu": "              const available = sessions === undefined || sessions.subagentAddress === undefined\n                ? true\n                : (() => {\n                    const address = sessions.subagentAddress(sessionId);\n                    return address === undefined || address.mode === \"continuable\";\n                  })();"
+        }
+      ],
+      "optional": true
+    },
+    {
+      "patch": "06-model-picker.client.js.patch",
+      "package": "dsh-model-picker",
+      "path": "lib/client.js",
+      "base": "profile",
+      "hunks": [
+        {
+          "old": "          const available = sessions !== undefined && typeof sessions.subagentAddress === 'function'\n            ? sessions.subagentAddress(sessionId) === undefined\n            : true",
+          "neu": "          const available = sessions !== undefined && typeof sessions.subagentAddress === 'function'\n            ? (() => {\n                const address = sessions.subagentAddress(sessionId)\n                return address === undefined || address.mode === 'continuable'\n              })()\n            : true"
+        }
+      ],
+      "optional": true
     }
   ]
 }
